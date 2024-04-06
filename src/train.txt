@@ -1,0 +1,12 @@
+
+
+
+
+best:
+
+CUDA_LAUNCH_BLOCKING=1 python learn.py --model RAGCA --ckpt_dir ../checkpoint/ --dataset FB15K-237 --early_stopping 20 --reg=0.08
+
+CUDA_LAUNCH_BLOCKING=1 python learn.py --model RAGCA --ckpt_dir ../checkpoint/ --dataset WN18 --early_stopping 20 --img_info ../embedings/WN18/CLIP_img_feature.pickle --dscp_info ../embedings/WN18/CLIP_description_feature.pickle --node_info ../embedings/WN18/CLIP_entity_text_feature.pickle --rel_desc_info ../embedings/WN18/CLIP_relation_text_feature.pickle  --reg 0.08
+
+CUDA_LAUNCH_BLOCKING=1 python learn.py --model RAGCA --ckpt_dir ../checkpoint/ --dataset WN9 --early_stopping 20 --img_info ../embedings/WN9/CLIP_img_feature.pickle --dscp_info ../embedings/WN9/CLIP_description_feature.pickle --node_info ../embedings/WN9/CLIP_entity_text_feature.pickle --rel_desc_info ../embedings/WN9/CLIP_relation_text_feature.pickle  --reg 0.08
+
