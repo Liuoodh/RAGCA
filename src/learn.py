@@ -112,7 +112,7 @@ parser.add_argument(
     help="Initial scale"
 )
 parser.add_argument(
-    '--learning_rate', default=1e-1, type=float,
+    '--learning_rate', default=1e-2, type=float,
     help="Learning rate"
 )
 parser.add_argument(

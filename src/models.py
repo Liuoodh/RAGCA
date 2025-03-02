@@ -77,7 +77,7 @@ class RAGCA(KBCModel):
         self.n_node = n_node
         self.n_rel = n_rel
         self.dim = dim
-        self.tem=16
+        self.tem=8
         self.context_weight = context_weight
         self.adj_indices, self.adj_values = adj[0].to('cuda'), adj[1].to('cuda')
         self.n_neighbor = n_neighbor
@@ -87,13 +87,8 @@ class RAGCA(KBCModel):
         if desc_info is not None:
             self.desc_info = nn.Embedding.from_pretrained(
                 torch.from_numpy(pickle.load(open(desc_info, 'rb'))), freeze=False)
-        if node_info is not None:
-            self.desc_info = nn.Embedding.from_pretrained(
-                torch.from_numpy(pickle.load(open(node_info, 'rb'))), freeze=False)
-        else:
-            self.node_info = nn.Embedding(n_node, dim, sparse=True)
-            nn.init.xavier_uniform_(self.node_info.weight)
-
+        self.node_info = nn.Embedding(n_node, dim, sparse=True)
+        nn.init.xavier_uniform_(self.node_info.weight)
         if rel_desc_info is not None:
             self.rel_info = nn.Embedding.from_pretrained(
                 torch.vstack((torch.from_numpy(pickle.load(open(rel_desc_info, 'rb'))),
@@ -115,12 +110,6 @@ class RAGCA(KBCModel):
         self._score_context = ConvE(dim, n_node, self.node_info)
         self.context_enhancement_net=ContextE(dim)
         # 采样层
-        self.lhs_node_fc1 = nn.Linear(dim,dim)
-        self.lhs_node_fc2 = nn.Linear(dim, dim)
-        self.lhs_img_fc1 = nn.Linear(dim, dim)
-        self.lhs_img_fc2 = nn.Linear(dim, dim)
-        self.lhs_desc_fc1 = nn.Linear(dim, dim)
-        self.lhs_desc_fc2 = nn.Linear(dim, dim)
         self.rel_fc1 = nn.Linear(dim, dim)
         self.rel_fc2 = nn.Linear(dim, dim)
         self.rel_fc3 = nn.Linear(dim, dim)
@@ -131,18 +120,14 @@ class RAGCA(KBCModel):
     def forward(self, x, candidate=False, score=False, chunk_begin=-1, chunk_size=-1):
         lhs_node = self.node_info.weight[x[:, 0]]
         lhs_desc = self.desc_info.weight[x[:, 0]]
-        lhs_img = self.img_info.weight[x[:, 0]]
+        lhs_desc/=self.tem
+        lhs_img = self.img_info.weight[x[:, 0]].float()
+        lhs_img/=self.tem
         rel = self.rel_info.weight[x[:, 1]]
         trans_n = torch.transpose(lhs_node.unsqueeze(2), 1, 2)
-        lhs_node1 = self.lhs_node_fc1(lhs_node)
-        lhs_node2 = self.lhs_node_fc2(lhs_node)
-        lhs_desc1 = self.lhs_desc_fc1(lhs_desc)
-        lhs_desc2 = self.lhs_desc_fc2(lhs_desc)
-        lhs_img1 = self.lhs_img_fc1(lhs_img)
-        lhs_img2 = self.lhs_img_fc2(lhs_img)
-        M_in = torch.bmm(lhs_img2.unsqueeze(2).to(torch.float32), torch.transpose(lhs_node1.unsqueeze(2), 1, 2))
-        M_id = torch.bmm(lhs_desc2.unsqueeze(2).to(torch.float32), torch.transpose(lhs_img1.unsqueeze(2), 1, 2))
-        M_dn = torch.bmm(lhs_node2.unsqueeze(2).to(torch.float32), torch.transpose(lhs_desc1.unsqueeze(2), 1, 2))
+        M_in = torch.bmm(lhs_img.unsqueeze(2).to(torch.float32),trans_n)
+        M_dn = torch.bmm(lhs_desc.unsqueeze(2).to(torch.float32),trans_n)
+        M_id = torch.bmm(lhs_img.unsqueeze(2).to(torch.float32), torch.transpose(lhs_desc.unsqueeze(2), 1, 2))
         M = M_dn * M_id * M_in
         att1 = torch.bmm(torch.sigmoid(self.rel_fc1(rel)).unsqueeze(2).to(torch.float32),trans_n)
         att2 = torch.bmm(torch.sigmoid(self.rel_fc2(rel)).unsqueeze(2).to(torch.float32), trans_n)
@@ -155,7 +140,6 @@ class RAGCA(KBCModel):
         guide_weight = F.softmax(rel.mm(self.rel_guide_weight_), dim=1)
         masks = (torch.unsqueeze(guide_weight[:, 0], dim=1),torch.unsqueeze(guide_weight[:, 1], dim=1),torch.unsqueeze(guide_weight[:, 2], dim=1),torch.unsqueeze(guide_weight[:, 3], dim=1))
         fusion_info = (masks[0]*lhs_fusion_all+masks[1]*lhs_fusion_id+masks[2]*lhs_i+masks[3]*lhs_d).to(torch.float32)
-
         # batch_size x k x dim
         context_rel = self.get_context_rel(self.rel_info.weight,x)
         context_node = self.get_context_nodes(self.node_info.weight,x)
@@ -164,7 +148,6 @@ class RAGCA(KBCModel):
         context_input = torch.stack((context_node, context_desc, context_img, context_rel), dim=1)
         context_info = self.context_enhancement_net(context_input,lhs_node,rel)
         rhs_node = self.node_info.weight[x[:, 2]]
-        assert not torch.isnan(fusion_info).any()
         pred_node = self._score(fusion_info, rel,rhs = rhs_node,to_score=self.node_info.weight,candidate=candidate, score=score, start=chunk_begin,
                             end=chunk_begin + chunk_size, queries=x)
         pred_context = self._score_context(context_info,rel,rhs = rhs_node,to_score=self.node_info.weight,candidate=candidate, score=score, start=chunk_begin,
@@ -197,38 +180,25 @@ class RAGCA(KBCModel):
         filter_desc,filter_img =self.relation_attention_guide_filter(lhs_node, rel, desc_info, img_info)
         return lhs_node+filter_desc+filter_img
 
-    # 得到当前节点周围 K 个 邻居的嵌入 先把当前节点所有相关的 关系嵌入和当前节点一起输入 再输出 然后把输出和邻居节点们一起输入 再输出
-    # 三种模态 运算三次 然后再融合 随机加入mask 隐藏源实体
-    # 防止上下文信息不足 加入 重构损失 重建源实体
     def get_context_rel(self,rels, x):
-        # 源实体
-        # with torch.no_grad():
         batch_size = len(x)
-        relevant_rels = torch.zeros((batch_size, self.n_neighbor, self.dim)).to('cuda')  # 创建结果张量，形状为 batch_size x k x dim
-        # 获取x中所有头节点对应的关系的索引
-        head_nodes = x[:, 0].to('cuda')  # 提取所有头节点
+        relevant_rels = torch.zeros((batch_size, self.n_neighbor, self.dim)).to('cuda')
+        head_nodes = x[:, 0].to('cuda')
         head_indices = torch.nonzero((self.adj_indices[:, 0].unsqueeze(0) == head_nodes.unsqueeze(1))).to('cuda')
-        # 获取每个头节点对应的关系数量 维度为batch_size 值为每个节点拥有的关系数量
         head_counts = torch.bincount(head_indices[:, 0], minlength=batch_size).to('cuda')
-        # 找到关系数量小于k的头节点的id
         flag = head_counts < self.n_neighbor
-        # 获取关系数量小于k的头节点的索引
         insufficient_head_indices = torch.nonzero(flag).squeeze().to('cuda')
         insufficient_head_indices_len = insufficient_head_indices.shape[
             0] if insufficient_head_indices.numel() != 0 else 0
         sufficient_head_indices = torch.nonzero(~flag).squeeze().to('cuda')
         sufficient_head_indices_len = sufficient_head_indices.shape[0] if sufficient_head_indices.numel() != 0 else 0
-        # len(insufficient_head_indices) 表示有几个关系数量小于k的头节点
         # 以下循环运算 batch_size 越小 运算越快
         if insufficient_head_indices_len > 0:
             for idx in insufficient_head_indices:
                 mask = head_indices[:, 0] == idx
                 rel_indices=self.adj_values[head_indices[mask][:, 1]]
-                # rel_indices=torch.masked_select(rel_indices,rel_indices !=x[idx][1])
                 insufficient_head_relations = rels[rel_indices]
-                # 创建全零嵌入矩阵
                 zero_embeddings = torch.zeros((self.n_neighbor - insufficient_head_relations.shape[0], rels.shape[1])).to('cuda')
-                # 将嵌入向量存储在结果中
                 relevant_rels[idx] = torch.cat((insufficient_head_relations, zero_embeddings))
         if sufficient_head_indices_len > 0:
             for idx in sufficient_head_indices:
@@ -245,40 +215,29 @@ class RAGCA(KBCModel):
         return relevant_rels
 
     def get_context_nodes(self, nodes, x):
-        # 源实体
-        # with torch.no_grad():
         batch_size = len(x)
         relevant_nodes = torch.zeros((batch_size, self.n_neighbor, self.dim)).to('cuda')
-        # 获取x中所有头节点对应的关系的索引
         head_nodes = x[:, 0].to('cuda')  # 提取所有头节点
         head_indices = torch.nonzero((self.adj_indices[:, 0].unsqueeze(0) == head_nodes.unsqueeze(1))).to('cuda')
-        # 获取每个头节点对应的关系数量 维度为batch_size 值为每个节点拥有的关系数量
         head_counts = torch.bincount(head_indices[:, 0], minlength=batch_size).to('cuda')
         tail_indices = self.adj_indices[:, 1].to('cuda')
-        # 找到关系数量小于k的头节点的id
         flag = head_counts < self.n_neighbor
-        # 获取关系数量小于k的头节点的索引
         insufficient_head_indices = torch.nonzero(flag).squeeze().to('cuda')
         insufficient_head_indices_len = insufficient_head_indices.shape[
             0] if insufficient_head_indices.numel() != 0 else 0
         sufficient_head_indices = torch.nonzero(~flag).squeeze().to('cuda')
         sufficient_head_indices_len = sufficient_head_indices.shape[0] if sufficient_head_indices.numel() != 0 else 0
-        # len(insufficient_head_indices) 表示有几个关系数量小于k的头节点
-        # 以下循环运算 batch_size 越小 运算越快
         if insufficient_head_indices_len > 0:
             for idx in insufficient_head_indices:
                 mask = head_indices[:, 0] == idx
                 node_indices = tail_indices[head_indices[mask][:, 1]]
-                # node_indices = torch.masked_select(node_indices, node_indices != x[idx][2])
                 insufficient_head_nodes = nodes[node_indices]
-                # 创建全零嵌入矩阵
                 zero_embeddings = torch.zeros((self.n_neighbor - insufficient_head_nodes.shape[0], nodes.shape[1])).to('cuda')
                 relevant_nodes[idx] = torch.cat((insufficient_head_nodes, zero_embeddings))
         if sufficient_head_indices_len > 0:
             for idx in sufficient_head_indices:
                 mask = head_indices[:, 0] == idx
                 node_indices = tail_indices[head_indices[mask][:self.n_neighbor, 1]]
-                # node_indices = torch.masked_select(node_indices, node_indices != x[idx][2])
                 sufficient_head_nodes = nodes[node_indices]
                 if sufficient_head_nodes.shape[0] < self.n_neighbor:
                     zero_embeddings = torch.zeros((self.n_neighbor - sufficient_head_nodes.shape[0], nodes.shape[1])).to(
